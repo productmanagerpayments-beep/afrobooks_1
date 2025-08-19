@@ -1,179 +1,657 @@
-import React, { useState } from "react";
-const Badge = ({ children, className = "", ...props }) => (
-  <span {...props} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${className}`}>{children}</span>
-);
-const Button = ({ children, onClick, variant = "primary", disabled }) => {
-  const base = "px-3 py-2 rounded-xl text-sm font-medium shadow-sm transition active:scale-[.98] disabled:opacity-50 disabled:cursor-not-allowed";
-  const variants = { primary: "bg-blue-500 hover:bg-blue-600 text-white", ghost: "bg-slate-800 text-slate-200 hover:bg-slate-700", outline: "border border-slate-600 text-slate-100 hover:bg-slate-800", success: "bg-emerald-500 hover:bg-emerald-600 text-white", danger: "bg-rose-500 hover:bg-rose-600 text-white" };
-  return (<button className={`${base} ${variants[variant]}`} onClick={onClick} disabled={disabled}>{children}</button>);
+import React, { useMemo, useRef, useState, useEffect } from "react";
+import "./App.css";
+import { createPortal } from "react-dom";
+
+/* ---------------- Глоссарий ---------------- */
+const GLOSSARY = {
+  idem: {
+    title: "Идемпотентный ключ",
+    text: "Уникальный ID запроса. Повтор с тем же ключом не создаст второй платёж.",
+    link: "https://ru.wikipedia.org/wiki/%D0%98%D0%B4%D0%B5%D0%BC%D0%BF%D0%BE%D1%82%D0%B5%D0%BD%D1%82%D0%BD%D0%BE%D1%81%D1%82%D1%8C",
+  },
+  bff: {
+    title: "BFF (Backend For Frontend)",
+    text: "Прослойка между фронтом и внутренними сервисами. Упрощает клиент, агрегирует вызовы.",
+    link: "https://microservices.io/patterns/apigateway.html",
+  },
+  psp: {
+    title: "Платёжный провайдер (PSP)",
+    text: "Авторизация/списание, связь с платёжными сетями и банками, 3-D Secure.",
+    link: "https://en.wikipedia.org/wiki/Payment_service_provider",
+  },
+  webhook: {
+    title: "Вебхук",
+    text: "Асинхронное уведомление от внешнего сервиса на наш сервер о статусе платежа.",
+    link: "https://ru.wikipedia.org/wiki/Webhook",
+  },
+  intent: {
+    title: "Payment Intent",
+    text: "«Намерение» платежа: сумма/валюта/метод. Готовим до списания.",
+    link: "https://stripe.com/docs/payments/payment-intents",
+  },
+  auth: {
+    title: "Авторизация",
+    text: "Банк проверяет возможность списания. Сумма временно блокируется.",
+    link: "https://en.wikipedia.org/wiki/Authorization_hold",
+  },
+  capture: {
+    title: "Capture (списание)",
+    text: "Финальное списание средств после авторизации.",
+    link: "https://stripe.com/docs/payments/capture-later",
+  },
+  token: {
+    title: "Токенизация",
+    text: "Карт-данные заменяются безопасным токеном (магазин не хранит PAN).",
+    link: "https://en.wikipedia.org/wiki/Tokenization_(data_security)",
+  },
+  ds3: {
+    title: "3-D Secure",
+    text: "Подтверждение у банка (СМС/Push/FaceID), чтобы убедиться, что платит владелец.",
+    link: "https://ru.wikipedia.org/wiki/3-D_Secure",
+  },
+  risk: {
+    title: "Проверка риска",
+    text: "Автоматические проверки (гео/частота/устройство/списки) для отсечения мошенничества.",
+    link: "https://en.wikipedia.org/wiki/Fraud_detection",
+  },
 };
-const Switch = ({ checked, onChange, label }) => (
-  <label className="flex items-center gap-2 cursor-pointer select-none">
-    <span className={`w-10 h-6 rounded-full p-1 transition ${checked ? "bg-blue-500" : "bg-slate-600"}`}><span className={`h-4 w-4 bg-white rounded-full block transition ${checked ? "translate-x-4" : "translate-x-0"}`}></span></span>
-    <span className="text-sm text-slate-200">{label}</span>
-    <input type="checkbox" className="hidden" checked={checked} onChange={(e)=>onChange(e.target.checked)} />
-  </label>
-);
-const Chip = ({ children, tone = "default" }) => {
-  const tones = { default: "border-slate-700 text-slate-200", info: "border-blue-400 text-blue-300", warn: "border-amber-400 text-amber-300", ok: "border-emerald-400 text-emerald-300", bad: "border-rose-400 text-rose-300" };
-  return <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs ${tones[tone]}`}>{children}</span>;
+
+/* ---------- Компонент термина с автопозиционированием поповера ---------- */
+function Term({ k, children }) {
+  const [open, setOpen] = useState(false);
+  const [style, setStyle] = useState({});
+  const wrapRef = useRef(null);
+  const item = GLOSSARY[k];
+
+  useEffect(() => {
+    if (!open || !wrapRef.current) return;
+    const rect = wrapRef.current.getBoundingClientRect();
+    const margin = 12;
+    const popoverWidth = 320;
+    const minH = 140;
+    const maxHCap = 480;
+
+    // Горизонталь
+    const overflowRight = rect.left + popoverWidth > window.innerWidth - margin;
+    const left = overflowRight ? rect.right - popoverWidth : rect.left;
+
+    // Вертикаль
+    const spaceBelow = window.innerHeight - rect.bottom - margin;
+    const spaceAbove = rect.top - margin;
+    let openDown = true;
+    if (spaceBelow < minH && spaceAbove > spaceBelow) openDown = false;
+
+    const avail = openDown ? spaceBelow : spaceAbove;
+    const maxHeight = Math.max(minH, Math.min(avail - 8, maxHCap));
+
+    const top = openDown ? rect.bottom + 6 : rect.top - maxHeight - 6;
+
+    setStyle({
+      position: "fixed",
+      top,
+      left: Math.max(8, left),
+      width: Math.min(popoverWidth, window.innerWidth - 16),
+      maxHeight,
+      overflowY: "auto",
+      zIndex: 9999, // поверх всего
+    });
+  }, [open]);
+
+  // закрытие по ESC
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  if (!item) return <>{children}</>;
+
+  return (
+    <span ref={wrapRef} className="term" onClick={() => setOpen(v => !v)}>
+      {children}
+      {open &&
+        createPortal(
+          <div className="popover" style={style}>
+            <div className="popover-title">{item.title}</div>
+            <div className="popover-text">{item.text}</div>
+            {item.link && (
+              <a className="popover-link" href={item.link} target="_blank" rel="noreferrer">
+                Подробнее →
+              </a>
+            )}
+          </div>,
+          document.body
+        )}
+    </span>
+  );
+}
+
+
+/* ---------- Парсер [[ключ|Метка]] → текст + <Term/> ---------- */
+function renderWithTerms(text) {
+  if (!text) return null;
+  const parts = [];
+  const re = /\[\[(\w+)\|([^\]]+)\]\]/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    parts.push(<Term key={`${m.index}-${m[1]}`} k={m[1]}>{m[2]}</Term>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+/* ---------------- Этапы ---------------- */
+const Steps = {
+  CATALOG: "CATALOG",
+  CART: "CART",
+  CUSTOMER: "CUSTOMER",
+  PAYMENT: "PAYMENT",
+  AUTH: "AUTH",
+  PROCESSING: "PROCESSING",
+  RESULT: "RESULT",
 };
-const Explain = ({ title, children }) => { const [open, setOpen] = useState(false); return (
-  <span className="relative inline-block">
-    <Badge className="border-sky-400 text-sky-300 hover:bg-slate-800/60 cursor-pointer" onMouseEnter={()=>setOpen(true)} onMouseLeave={()=>setOpen(false)} onClick={()=>setOpen(v=>!v)}>✳︎ Explain</Badge>
-    {open && (<div className="absolute z-20 mt-2 w-[320px] max-w-[80vw] rounded-xl border border-slate-700 bg-slate-900 p-3 text-sm text-slate-200 shadow-xl"><div className="font-semibold text-sky-300 mb-1">{title}</div><div className="leading-relaxed">{children}</div></div>)}
-  </span> ); };
-const Steps = { CART: "CART", PAYMENT: "PAYMENT", AUTH: "AUTH", PROCESSING: "PROCESSING", RESULT: "RESULT" };
-const ResultKinds = { SUCCESS: "SUCCESS", FAIL: "FAIL" };
-const nowHHMMSS = () => new Date().toLocaleTimeString();
+const ORDER = [Steps.CATALOG, Steps.CART, Steps.CUSTOMER, Steps.PAYMENT, Steps.AUTH, Steps.PROCESSING, Steps.RESULT];
+const ResultKinds = { SUCCESS: "SUCCESS", FAIL: "FAIL", NONE: "NONE" };
+/* ---------- Pricing helpers ---------- */
+const UNIT_PRICE = 1299;
+
+function discountRateByQty(qty) {
+  // 5% за каждые полные 3 книги, максимум 15%
+  const steps = Math.floor(qty / 3);
+  const rate = Math.min(steps * 0.05, 0.15);
+  return rate;
+}
+
+function computePricing(qty) {
+  const subtotal = UNIT_PRICE * qty;
+  const rate = discountRateByQty(qty);
+  const discount = Math.round(subtotal * rate);
+  const total = subtotal - discount;
+  return { unit: UNIT_PRICE, subtotal, rate, discount, total };
+}
+
+function fmtRUB(n) {
+  return n.toLocaleString("ru-RU") + " ₽";
+}
+
+function pct(p) {
+  return Math.round(p * 100) + "%";
+}
+/* ---------------- Главный компонент ---------------- */
 export default function App() {
-  const [step, setStep] = useState(Steps.CART);
-  const [result, setResult] = useState(null);
-  const [log, setLog] = useState([]);
+  const [step, setStep] = useState(Steps.CATALOG);
+  const [result, setResult] = useState(ResultKinds.NONE);
+
+  const [qty, setQty] = useState(1);
+  const [email, setEmail] = useState("reader@example.com");
+  const [name, setName] = useState("Иван П.");
+  const [method, setMethod] = useState("card_saved");
+
   const [require3DS, setRequire3DS] = useState(true);
   const [force3DSFail, setForce3DSFail] = useState(false);
-  const [simulateTimeout, setSimulateTimeout] = useState(false);
   const [declineAtAcquirer, setDeclineAtAcquirer] = useState(false);
-  const [method, setMethod] = useState("card_saved");
-  const reset = () => { setStep(Steps.CART); setResult(null); setLog([]); };
-  const pushLog = (msg) => setLog((l) => [{ t: nowHHMMSS(), msg }, ...l]);
-  const goPayment = () => { pushLog("Checkout UI → BFF: GET /checkout (idem-key) | Recalc cart"); setStep(Steps.PAYMENT); };
-  const startPayment = () => { pushLog("BFF → Order: create Pending | Risk pre-score"); pushLog(`Start payment intent: method=${method}`); if (require3DS) { setStep(Steps.AUTH); } else { authorize(); } };
-  const authorize = () => {
-    pushLog("Orchestrator → PSP: AUTH request");
-    if (declineAtAcquirer) { pushLog("PSP → decline: insufficient_funds (sample)"); setResult(ResultKinds.FAIL); setStep(Steps.RESULT); return; }
-    if (require3DS) {
-      pushLog("PSP → 3DS Server: init");
-      if (force3DSFail) { pushLog("3DS → FAIL (challenge failed)"); setResult(ResultKinds.FAIL); setStep(Steps.RESULT); return; }
-      else { pushLog("3DS → OK (frictionless or challenge)"); }
-    }
-    pushLog("PSP → Orchestrator: auth_approved");
-    setStep(Steps.PROCESSING);
-    if (simulateTimeout) { pushLog("Client timeout/refresh while waiting… (UI shows Processing…)"); }
-    import.meta.hot;  # harmless no-op to satisfy bundler in this environment
-    from_failure = false  # placeholder comment
-    __x = 0  # no-op
-    import time as __t  # not executed; placeholder
-    import sys as __s  # placeholder
-    setTimeout = (fn, ms) => setTimeout(fn, ms)  # placeholder JS note (ignored here)
-    # The above placeholders are comments to avoid unused warnings in some linters; safe to ignore.
-    setTimeout(() => { if (result === ResultKinds.FAIL) return; pushLog("PSP → Webhook: payment.captured | signature OK"); pushLog("Webhooks → Order: mark Paid"); setResult(ResultKinds.SUCCESS); setStep(Steps.RESULT); }, simulateTimeout ? 2200 : 1200);
+  const [simulateTimeout, setSimulateTimeout] = useState(false);
+
+  const [log, setLog] = useState([]);
+  const [tab, setTab] = useState("all"); // all | business | tech
+  const ts = () => new Date().toLocaleTimeString();
+  const addLog = (type, text) => setLog((l) => [...l, { type, text, ts: ts() }]);
+  const filteredLog = useMemo(() => (tab === "all" ? log : log.filter((e) => e.type === tab)), [log, tab]);
+  const go = (s) => setStep(s);
+
+  /* ---- Бизнес-переходы ---- */
+  const onAddToCart = () => {
+    addLog("business", "Добавили книгу в корзину.");
+    addLog("tech", "Frontend → [[bff|BFF]]: POST /cart/items (book_id, qty).");
+    go(Steps.CART);
   };
-  const continueAuth = () => authorize();
-  const stepTitle = { [Steps.CART]: "Корзина и проверка суммы", [Steps.PAYMENT]: "Выбор способа оплаты и запуск платежа", [Steps.AUTH]: "Аутентификация 3‑D Secure", [Steps.PROCESSING]: "Обработка и ожидание вебхука", [Steps.RESULT]: result === ResultKinds.SUCCESS ? "Платёж подтверждён" : "Оплата не прошла", }[step];
-  return (<div className="min-h-screen bg-slate-950 text-slate-100"><div className="mx-auto max-w-7xl px-4 py-6"><header className="mb-4 flex items-center justify-between"><div><h1 className="text-2xl font-semibold">Симулятор оформления покупки книги</h1><p className="text-slate-400 text-sm">Сценарий: вы — давний пользователь, книга уже в корзине. Покажем путь от «Оформить» до подтверждения платежа и что происходит за кулисами.</p></div><div className="flex items-center gap-2"><Button variant="ghost" onClick={reset}>Сброс</Button><Button variant="outline" onClick={()=>window.scrollTo({top:document.body.scrollHeight, behavior:'smooth'})}>Вниз к логам</Button></div></header><div className="grid grid-cols-12 gap-4"><section className="col-span-12 lg:col-span-8"><div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4"><div className="mb-3 flex items-center justify-between"><div><div className="text-xs uppercase tracking-wide text-slate-400">Текущий шаг</div><div className="text-lg font-medium">{stepTitle}</div></div><div className="flex items-center gap-2"><Chip tone="info">Idem‑Key</Chip><Chip tone="info">Webhooks</Chip>{require3DS && <Chip tone="warn">3‑D Secure</Chip>}</div></div><div className="mx-auto w-full max-w-[420px] rounded-[28px] border border-slate-700 bg-slate-950 p-3 shadow-2xl"><div className="mx-auto h-[24px] w-32 rounded-b-2xl bg-slate-800" /><div className="mt-2 rounded-2xl border border-slate-800 bg-slate-900 p-4 min-h-[520px]">{step === Steps.CART && (<CartStep onNext={goPayment} />)}{step === Steps.PAYMENT && (<PaymentStep method={method} setMethod={setMethod} onPay={startPayment} />)}{step === Steps.AUTH && (<AuthStep onContinue={continueAuth} forceFail={force3DSFail} />)}{step === Steps.PROCESSING && (<ProcessingStep />)}{step === Steps.RESULT && (<ResultStep kind={result} onReset={reset} />)}</div></div><div className="mt-4 flex flex-wrap gap-2">{step === Steps.CART && (<Explain title="Что сейчас делает система">Frontend вызывает Checkout BFF с идемпотентным ключом, сервис корзины пересчитывает сумму (промо/налоги), готовится черновой заказ.</Explain>)}{step === Steps.PAYMENT && (<Explain title="Что происходит при нажатии «Оплатить»">BFF создаёт заказ (Pending) и запускает прескоринг риска. Оркестратор создаёт Payment Intent, SDK PSP токенизирует карту.</Explain>)}{step === Steps.AUTH && (<Explain title="3‑D Secure">В зависимости от политики SCA запускается frictionless (не видно пользователю) или challenge (подтверждение в банке). Мы не видим PAN — только токены.</Explain>)}{step === Steps.PROCESSING && (<Explain title="Почему экран ждёт вебхук">Источник истины — вебхуки PSP: auth/capture/failed. Клиент может перезагрузиться — по приходу вебхука заказ финализируется и UI подтянет статус.</Explain>)}{step === Steps.RESULT && (<Explain title="Финализация заказа">Webhooks Handler отмечает заказ Paid/Failed, оркестратор сводит платёж, Notifications отправляет квитанцию, BI получает событие.</Explain>)}</div></div><div className="mt-4 rounded-2xl border border-slate-800 bg-slate-900/40 p-4"><h3 className="mb-2 text-base font-semibold">Альтернативные сценарии</h3><div className="grid grid-cols-1 gap-3 md:grid-cols-2"><Switch checked={require3DS} onChange={setRequire3DS} label="Требуется 3‑D Secure" /><Switch checked={force3DSFail} onChange={setForce3DSFail} label="Неудача 3‑D Secure (challenge fail)" /><Switch checked={declineAtAcquirer} onChange={setDeclineAtAcquirer} label="Отказ банка на авторизации (decline)" /><Switch checked={simulateTimeout} onChange={setSimulateTimeout} label="Таймаут клиента (ожидание вебхука)" /></div><p className="mt-2 text-sm text-slate-400">Включайте флаги и проходите поток заново — увидите разные исходы и события в логе.</p></div></section><aside className="col-span-12 lg:col-span-4"><div className="sticky top-4 flex flex-col gap-4"><div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4"><h3 className="mb-2 text-base font-semibold">События и интеграции</h3><ul className="space-y-2 text-sm text-slate-200"><li>• Frontend ↔ Checkout BFF — REST/GraphQL (идемпотентность)</li><li>• BFF ↔ Cart/Risk/Order/Orchestrator — синхронные вызовы</li><li>• Orchestrator ↔ PSP — API + 3‑D Secure</li><li>• PSP → Webhooks → Order/Orchestrator — асинхронное обновление статусов</li><li>• Order → Notifications/BI — события «Paid/Failed»</li></ul></div><div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4"><h3 className="mb-2 text-base font-semibold">Лог действий</h3><div className="h-72 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-2 text-xs">{log.length === 0 ? (<div className="p-2 text-slate-500">Здесь появятся системные события.</div>) : (<ul className="space-y-1">{log.map((e, i) => (<li key={i} className="whitespace-pre-wrap"><span className="text-slate-500">[{e.t}]</span> {e.msg}</li>))}</ul>)}</div></div><div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4"><h3 className="mb-2 text-base font-semibold">Подсказки</h3><ul className="list-disc pl-5 text-sm text-slate-300 space-y-1"><li>Двойной клик не страшен: один idem‑key → один платеж.</li><li>Если UI «висит», ждём вебхук — он финализирует заказ.</li><li>Сохранённые методы оплаты уменьшают трение и ускоряют оплату.</li></ul></div></div></aside></div></div></div>);
-}
-function CartStep({ onNext }) {
-  return (
-    <div className="flex h-full flex-col">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="text-sm text-slate-300">Ваша корзина</div>
-        <Chip tone="ok">Авторизован</Chip>
+
+  const onConfirmCart = () => {
+    addLog("business", "Подтвердили корзину, зафиксировали сумму.");
+    addLog("tech", "Frontend → [[bff|BFF]]: POST /checkout (с [[idem|idem-key]]). BFF → Order: создать заказ (Pending).");
+    go(Steps.CUSTOMER);
+  };
+
+  const onCustomerContinue = () => {
+    // ✅ Явно переводим на этап оплаты (фикс №1)
+    addLog("business", `Сохранили контакты: ${name}, ${email}.`);
+    addLog("tech", "BFF → Order: PATCH /orders/{id} (customer info).");
+    setStep(Steps.PAYMENT);
+  };
+
+  const onPay = () => {
+    addLog("business", "Выбрали способ оплаты. Запускаем оплату.");
+    addLog("tech", "BFF → [[risk|Risk]]: прескоринг; Оркестратор: создать [[intent|Payment Intent]], выполнить [[token|токенизацию]].");
+    if (require3DS) {
+      addLog("business", "Банк запросил подтверждение (3-D Secure).");
+      setStep(Steps.AUTH);
+    } else {
+      authorize();
+    }
+  };
+
+  const authorize = () => {
+    addLog("tech", "Оркестратор → [[psp|PSP]]: AUTH request.");
+    if (declineAtAcquirer) {
+      addLog("business", "Банк отклонил авторизацию (недостаточно средств/лимит/блокировка).");
+      addLog("tech", "PSP/Банк: decline. Возврат отказа.");
+      setResult(ResultKinds.FAIL);
+      setStep(Steps.RESULT);
+      return;
+    }
+    if (require3DS) {
+      if (force3DSFail) {
+        addLog("business", "Пользователь не прошёл 3-D Secure. Платёж отклонён.");
+        addLog("tech", "3DS challenge → failed.");
+        setResult(ResultKinds.FAIL);
+        setStep(Steps.RESULT);
+        return;
+      }
+      addLog("business", "3-D Secure подтверждён. Продолжаем.");
+    }
+    addLog("tech", "PSP: [[auth|auth_approved]]. Сумма заблокирована (authorization hold).");
+    setStep(Steps.PROCESSING);
+
+    setTimeout(() => {
+      if (simulateTimeout) {
+        addLog("business", "Клиент мог закрыть вкладку — статус придёт по [[webhook|вебхуку]].");
+      }
+      addLog("tech", "PSP → [[webhook|Webhook]]: payment.[[capture|captured]].");
+      addLog("tech", "Order: статус → Paid. Notifications: чек пользователю.");
+      setResult(ResultKinds.SUCCESS);
+      setStep(Steps.RESULT);
+      addLog("business", "Платёж завершён. Заказ оплачен.");
+    }, 1200);
+  };
+
+  const reset = () => {
+    setStep(Steps.CATALOG);
+    setResult(ResultKinds.NONE);
+    setLog([]);
+  };
+
+  /* ---- Метаданные шагов ---- */
+  const meta = {
+    [Steps.CATALOG]: {
+      title: "Каталог",
+      business: ["Пользователь видит книгу, выбирает количество. Цена пересчитывается с учётом скидки 5% за каждые 3 книги (до 15%)."],
+tech: ["Frontend локально пересчитывает сумму. Frontend → [[bff|BFF]]: POST /cart/items (book_id, qty). BFF → Cart: пересчёт total."],
+      ui: (
+  <div className="catalog">
+    <div className="book">
+      <div className="cover" />
+      <div className="info">
+        <div className="name">«Секреты архитектуры платежей»</div>
+        <div className="meta">Бумажная, 352 стр. · ISBN 978-1-23456-789-7</div>
+        <div className="price">Цена за шт: {fmtRUB(UNIT_PRICE)}</div>
+
+        <div className="qty">
+          Кол-во:
+          <input
+            type="number"
+            min="1"
+            value={qty}
+            onChange={(e) => setQty(Math.max(1, parseInt(e.target.value || 1, 10)))}
+          />
+        </div>
+
+        {/* Превью суммы со скидкой */}
+        {(() => {
+          const p = computePricing(qty);
+          return (
+            <div className="preview">
+              <div className="row">
+                <span>Подытог</span>
+                <b>{fmtRUB(p.subtotal)}</b>
+              </div>
+              {p.discount > 0 && (
+                <div className="row green">
+                  <span>Скидка {pct(p.rate)}</span>
+                  <b>−{fmtRUB(p.discount)}</b>
+                </div>
+              )}
+              <div className="row total">
+                <span>Итого</span>
+                <b>{fmtRUB(p.total)}</b>
+              </div>
+            </div>
+          );
+        })()}
+
+        <button type="button" className="btn btn-primary" onClick={onAddToCart}>
+          В корзину
+        </button>
       </div>
-      <div className="flex-1 space-y-3">
-        <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">
-          <div className="flex items-center gap-3">
-            <div className="h-14 w-10 flex-none rounded bg-slate-700" />
-            <div className="flex-1">
-              <div className="font-medium">«Секреты архитектуры платежей»</div>
-              <div className="text-xs text-slate-400">Бумажная, 352 стр. · ISBN 978‑1‑23456‑789‑7</div>
+    </div>
+  </div>
+),
+
+      onNext: onAddToCart,
+      back: null,
+    },
+    [Steps.CART]: {
+      title: "Корзина",
+      business: ["Проверяем состав заказа и количество, показываем пересчёт по правилу: 5% за каждые 3 книги (до 15%)."],
+tech: ["Cart/BFF: калькуляция total по qty и скидке, фиксация суммы в черновике заказа."],
+      ui: (
+  <div className="cart">
+    {(() => {
+      const p = computePricing(qty);
+      return (
+        <>
+          <div className="row">
+            <div className="title">«Секреты архитектуры платежей»</div>
+            <div className="qty">× {qty}</div>
+            <div className="sum">{fmtRUB(UNIT_PRICE)}</div>
+          </div>
+
+          <div className="row">
+            <div>Подытог</div>
+            <div>{fmtRUB(p.subtotal)}</div>
+          </div>
+
+          {p.discount > 0 && (
+            <div className="row promo">
+              <div>Скидка {pct(p.rate)}</div>
+              <div>−{fmtRUB(p.discount)}</div>
             </div>
-            <div className="text-right">
-              <div className="font-semibold">1 299 ₽</div>
-              <div className="text-xs text-emerald-300">Промо −200 ₽</div>
-            </div>
+          )}
+
+          <div className="row">
+            <div>Доставка</div>
+            <div>0 ₽ (эльфы)</div>
+          </div>
+
+          <div className="total">Итого к оплате: {fmtRUB(p.total)}</div>
+        </>
+      );
+    })()}
+  </div>
+),
+      cta: "Оформить заказ",
+      onNext: onConfirmCart,
+      back: () => setStep(Steps.CATALOG),
+    },
+    [Steps.CUSTOMER]: {
+      title: "Данные покупателя",
+      business: ["Собираем e-mail и имя для чека и уведомлений."],
+      tech: ["BFF → Order: PATCH customer info."],
+      ui: (
+        <div className="form">
+          <label>Имя<input value={name} onChange={(e) => setName(e.target.value)} /></label>
+          <label>E-mail<input value={email} onChange={(e) => setEmail(e.target.value)} /></label>
+        </div>
+      ),
+      cta: "Далее",
+      onNext: onCustomerContinue,
+      back: () => setStep(Steps.CART),
+    },
+    [Steps.PAYMENT]: {
+      title: "Оплата",
+      business: ["Выбор метода оплаты: карта/кошелёк.", "Запускаем антифрод-проверку, готовим платёж."],
+      tech: ["BFF → [[risk|Risk]]: прескоринг.", "Оркестратор: [[intent|Payment Intent]] + [[token|токенизация]]."],
+      ui: (
+        <div className="payment">
+          <div className="pm-group">
+            <label><input type="radio" name="pm" checked={method === "card_saved"} onChange={() => setMethod("card_saved")} /> Сохранённая карта •• 4242</label>
+            <label><input type="radio" name="pm" checked={method === "apple"} onChange={() => setMethod("apple")} /> Apple Pay</label>
+            <label><input type="radio" name="pm" checked={method === "wallet"} onChange={() => setMethod("wallet")} /> Электронный кошелёк</label>
+          </div>
+          <div className="flags">
+            <Toggle label="Требуется 3-D Secure" checked={require3DS} onChange={setRequire3DS} />
+            <Toggle label="Провал 3-D Secure" checked={force3DSFail} onChange={setForce3DSFail} />
+            <Toggle label="Отказ банка (decline)" checked={declineAtAcquirer} onChange={setDeclineAtAcquirer} />
+            <Toggle label="Таймаут клиента" checked={simulateTimeout} onChange={setSimulateTimeout} />
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-2 text-sm">
-          <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">Доставка: <b>0 ₽</b> (эльфы)</div>
-          <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">Налог: <b>включён</b></div>
+      ),
+      cta: "Оплатить",
+      onNext: onPay,
+      back: () => setStep(Steps.CUSTOMER),
+    },
+    [Steps.AUTH]: {
+      title: "3-D Secure",
+      business: ["Банк подтверждает, что платит владелец карты."],
+      tech: ["PSP инициирует [[ds3|3-D Secure]] через ACS банка."],
+      ui: (
+        <div className="auth">
+          <div className="loader" />
+          <div className="muted">Подтвердите оплату в приложении банка…</div>
         </div>
-      </div>
-      <div className="mt-4 flex items-center justify-between">
-        <div className="text-sm">Итого: <span className="text-lg font-semibold">1 099 ₽</span></div>
-        <Button onClick={onNext}>Оформить заказ</Button>
-      </div>
-    </div>
-  );
-}
-function PaymentStep({ method, setMethod, onPay }) {
+      ),
+      cta: "Продолжить",
+      onNext: () => authorize(),
+      back: () => setStep(Steps.PAYMENT),
+    },
+    [Steps.PROCESSING]: {
+      title: "Обработка",
+      business: [
+        "Деньги заблокированы (authorization hold). Ждём завершение списания.",
+        "Даже при перезагрузке страницы итог придёт по вебхуку.",
+      ],
+      tech: ["PSP: [[auth|auth_approved]] → [[capture|capture]] (часто автоматически).", "PSP → Магазин: [[webhook|вебхук]] captured/failed."],
+      ui: (
+        <div className="processing">
+          <div className="spinner" />
+          <div>Обрабатываем платёж… ждём подтверждение от банка</div>
+        </div>
+      ),
+      cta: "Ждём подтверждение…",
+      onNext: () => {},
+      back: () => setStep(Steps.PAYMENT),
+    },
+    [Steps.RESULT]: {
+      title: result === ResultKinds.SUCCESS ? "Оплата подтверждена" : "Оплата не прошла",
+      business: [result === ResultKinds.SUCCESS ? "Заказ оплачен. Квитанция отправлена на e-mail." : "Попробуйте другой метод оплаты или повторите позже."],
+      tech: [result === ResultKinds.SUCCESS ? "Order: статус → Paid. BI: событие об оплате." : "Order: статус → Failed. Возможно повторить с новым intent."],
+      ui: (
+        <div className="result">
+          {result === ResultKinds.SUCCESS ? <SuccessIcon /> : <FailIcon />}
+          <div className="muted">{result === ResultKinds.SUCCESS ? "Спасибо за покупку!" : "Что-то пошло не так…"}</div>
+        </div>
+      ),
+      cta: "Начать заново",
+      onNext: reset,
+      back: () => setStep(Steps.PAYMENT),
+    },
+  };
+
+  const m = meta[step];
+
   return (
-    <div className="flex h-full flex-col">
-      <div className="mb-3 text-sm text-slate-300">Оплата заказа #ORD‑12345</div>
-      <div className="space-y-3">
-        <div className="rounded-xl border border-slate-700 bg-slate-800/60 p-3">
-          <div className="mb-1 text-sm text-slate-300">Способ оплаты</div>
-          <div className="space-y-2">
-            <label className="flex items-center gap-2">
-              <input type="radio" name="pm" checked={method === "card_saved"} onChange={()=>setMethod("card_saved")} />
-              <span>Сохранённая карта •• 4242</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="radio" name="pm" checked={method === "apple"} onChange={()=>setMethod("apple")} />
-              <span>Apple Pay</span>
-            </label>
-            <label className="flex items-center gap-2">
-              <input type="radio" name="pm" checked={method === "wallet"} onChange={()=>setMethod("wallet")} />
-              <span>Электронный кошелёк</span>
-            </label>
+    <div className="shop">
+      <Topbar />
+      <div className="container">
+        <div className="grid">
+          <div className="col main">
+            <Card title={m.title} subtitle={labelOf(step)}>
+              {m.ui}
+              <Divider />
+              <TwoCols
+                left={<Checklist title="Бизнес" items={m.business} />}
+                right={<Techlist title="Интеграции" items={m.tech} />}
+              />
+              <div className="actions">
+                <button type="button" className="btn btn-ghost" onClick={m.back} disabled={!m.back}>Назад</button>
+                <button type="button" className="btn btn-primary" onClick={m.onNext}>{m.cta}</button>
+              </div>
+            </Card>
+          </div>
+
+          <div className="col side">
+            <Card title="Ход процесса" subtitle="Лог">
+              <div className="tabs">
+                <button type="button" className={`tab ${tab === "all" ? "active" : ""}`} onClick={() => setTab("all")}>Все</button>
+                <button type="button" className={`tab ${tab === "business" ? "active" : ""}`} onClick={() => setTab("business")}>Бизнес</button>
+                <button type="button" className={`tab ${tab === "tech" ? "active" : ""}`} onClick={() => setTab("tech")}>Интеграции</button>
+              </div>
+              <Log items={filteredLog} />
+            </Card>
+
+            <Card title="Где сейчас деньги" subtitle="Денежный поток">
+              <MoneyWhere step={step} />
+            </Card>
           </div>
         </div>
-        <label className="flex items-center gap-2 text-xs text-slate-300">
-          <input type="checkbox" defaultChecked /> Я согласен с условиями оферты
-        </label>
       </div>
-      <div className="mt-auto flex items-center justify-between">
-        <div className="text-sm text-slate-400">Итого к оплате: <b className="text-slate-100">1 099 ₽</b></div>
-        <Button onClick={onPay}>Оплатить</Button>
-      </div>
+
+      <Roadmap step={step} onSelect={go} />
     </div>
   );
 }
-function AuthStep({ onContinue, forceFail }) {
+
+/* ---------------- Вспомогательные компоненты ---------------- */
+function Topbar() {
   return (
-    <div className="flex h-full flex-col items-center justify-center text-center">
-      <div className="mb-2 text-sm text-slate-300">3‑D Secure (банк подтверждает плательщика)</div>
-      <div className="mx-auto mb-3 h-24 w-24 rounded-full border-4 border-slate-700 grid place-content-center">
-        <div className="h-8 w-8 animate-pulse rounded-full bg-sky-400" />
-      </div>
-      <div className="text-xs text-slate-400 mb-4">{forceFail ? "Имитация: пользователь не прошёл challenge" : "Имитация: подтверждение FaceID/в приложении банка"}</div>
-      <div className="flex gap-2">
-        <Button variant="success" onClick={onContinue} disabled={forceFail}>Продолжить</Button>
-        <Button variant="danger" onClick={onContinue} disabled={!forceFail}>Завершить с ошибкой</Button>
-      </div>
-    </div>
-  );
-}
-function ProcessingStep() {
-  return (
-    <div className="grid h-full place-content-center text-center">
-      <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-slate-700 border-t-blue-400" />
-      <div className="text-sm">Обрабатываем платёж… ждём подтверждение от банка</div>
-      <div className="mt-1 text-xs text-slate-400">Окно можно закрыть — статус подтянется по вебхуку.</div>
-    </div>
-  );
-}
-function ResultStep({ kind, onReset }) {
-  if (kind === ResultKinds.SUCCESS) {
-    return (
-      <div className="grid h-full place-content-center text-center">
-        <div className="mx-auto mb-3 h-14 w-14 grid place-content-center rounded-full bg-emerald-500/10 text-emerald-400">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+    <header className="topbar">
+      <div className="brand">
+        <span className="logo">XB</span>
+        <div className="titleblock">
+          <div className="title">AfroBooks Market</div>
+          <div className="subtitle">Интерактивный checkout • светлая тема</div>
         </div>
-        <div className="text-lg font-semibold text-emerald-300">Платёж подтверждён</div>
-        <div className="text-sm text-slate-300">Заказ #ORD‑12345 оплачен. Квитанция отправлена на почту.</div>
-        <div className="mt-4"><Button variant="ghost" onClick={onReset}>Вернуться к началу</Button></div>
       </div>
-    );
+      <a className="toplink" href="https://ru.wikipedia.org/wiki/3-D_Secure" target="_blank" rel="noreferrer">Что такое 3-D Secure?</a>
+    </header>
+  );
+}
+
+function Card({ title, subtitle, children }) {
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-sub">{subtitle}</div>
+          <h2 className="card-title">{title}</h2>
+        </div>
+      </div>
+      <div className="card-body">{children}</div>
+    </div>
+  );
+}
+const Divider = () => <div className="divider" />;
+function TwoCols({ left, right }) { return <div className="two"><div>{left}</div><div>{right}</div></div>; }
+
+function Checklist({ title, items }) {
+  return (
+    <div>
+      <div className="block-title">{title}</div>
+      <ul className="list">
+        {items.map((it, i) => (
+          <li className="list-item" key={i}>
+            <span className="bullet">•</span>
+            <span className="list-text">{renderWithTerms(typeof it === "string" ? it : "")}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+function Techlist({ title, items }) {
+  return (
+    <div>
+      <div className="block-title">{title}</div>
+      <ul className="list tech">
+        {items.map((it, i) => (
+          <li className="list-item" key={i}>
+            <span className="chip">API</span>
+            <span className="list-text">{renderWithTerms(typeof it === "string" ? it : "")}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Log({ items }) {
+  return (
+    <div className="log">
+      {items.length === 0 && <div className="muted">Здесь появятся события.</div>}
+      {items.map((e, i) => (
+        <div key={i} className={`log-row ${e.type}`}>
+          <div className="ts">{e.ts}</div>
+          <div className="text">{renderWithTerms(typeof e.text === "string" ? e.text : "")}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MoneyWhere({ step }) {
+  const map = {
+    [Steps.CATALOG]: 0,
+    [Steps.CART]: 0,
+    [Steps.CUSTOMER]: 1,
+    [Steps.PAYMENT]: 1,
+    [Steps.AUTH]: 2,
+    [Steps.PROCESSING]: 3,
+    [Steps.RESULT]: 4,
+  };
+  const idx = map[step] ?? 0;
+  const stages = ["У пользователя", "В магазине", "В PSP", "Холд в банке", "Списано"];
+  return (
+    <ul className="money-list">
+      {stages.map((s, i) => (
+        <li key={s} className={`money-item ${i === idx ? "active" : ""}`}>
+          <div className="dot" />
+          <div className="label">{s}</div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Roadmap({ step, onSelect }) {
+  const i = ORDER.indexOf(step);
+  return (
+    <div className="roadmap">
+      <div className="road">
+        {ORDER.map((s, idx) => (
+          <div key={s} className={`node ${idx <= i ? "done" : ""}`} onClick={() => onSelect(s)}>
+            <div className="n-dot" />
+            <div className="n-label">{labelOf(s)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function labelOf(s) {
+  switch (s) {
+    case Steps.CATALOG: return "Каталог";
+    case Steps.CART: return "Корзина";
+    case Steps.CUSTOMER: return "Данные";
+    case Steps.PAYMENT: return "Оплата";
+    case Steps.AUTH: return "3-D Secure";
+    case Steps.PROCESSING: return "Обработка";
+    case Steps.RESULT: return "Результат";
+    default: return s;
   }
+}
+function Toggle({ label, checked, onChange }) {
   return (
-    <div className="grid h-full place-content-center text-center">
-      <div className="mx-auto mb-3 h-14 w-14 grid place-content-center rounded-full bg-rose-500/10 text-rose-400">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-      </div>
-      <div className="text-lg font-semibold text-rose-300">Оплата не прошла</div>
-      <div className="text-sm text-slate-300">Попробуйте другой метод (Apple Pay/другая карта) или повторите позже.</div>
-      <div className="mt-4"><Button variant="ghost" onClick={onReset}>Попробовать ещё раз</Button></div>
+    <label className="toggle">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className={`slider ${checked ? "on" : ""}`} />
+      <span className="toggle-label">{label}</span>
+    </label>
+  );
+}
+function SuccessIcon() {
+  return (
+    <div className="icon success">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 6L9 17l-5-5"/></svg>
+    </div>
+  );
+}
+function FailIcon() {
+  return (
+    <div className="icon fail">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </div>
   );
 }
