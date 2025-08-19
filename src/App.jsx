@@ -156,7 +156,31 @@ const Steps = {
 };
 const ORDER = [Steps.CATALOG, Steps.CART, Steps.CUSTOMER, Steps.PAYMENT, Steps.AUTH, Steps.PROCESSING, Steps.RESULT];
 const ResultKinds = { SUCCESS: "SUCCESS", FAIL: "FAIL", NONE: "NONE" };
+/* ---------- Pricing helpers ---------- */
+const UNIT_PRICE = 1299;
 
+function discountRateByQty(qty) {
+  // 5% за каждые полные 3 книги, максимум 15%
+  const steps = Math.floor(qty / 3);
+  const rate = Math.min(steps * 0.05, 0.15);
+  return rate;
+}
+
+function computePricing(qty) {
+  const subtotal = UNIT_PRICE * qty;
+  const rate = discountRateByQty(qty);
+  const discount = Math.round(subtotal * rate);
+  const total = subtotal - discount;
+  return { unit: UNIT_PRICE, subtotal, rate, discount, total };
+}
+
+function fmtRUB(n) {
+  return n.toLocaleString("ru-RU") + " ₽";
+}
+
+function pct(p) {
+  return Math.round(p * 100) + "%";
+}
 /* ---------------- Главный компонент ---------------- */
 export default function App() {
   const [step, setStep] = useState(Steps.CATALOG);
@@ -254,45 +278,100 @@ export default function App() {
   const meta = {
     [Steps.CATALOG]: {
       title: "Каталог",
-      business: ["Пользователь видит книгу и добавляет её в корзину."],
-      tech: ["Frontend → [[bff|BFF]]: POST /cart/items. BFF → Cart: пересчёт суммы и промо."],
+      business: ["Пользователь видит книгу, выбирает количество. Цена пересчитывается с учётом скидки 5% за каждые 3 книги (до 15%)."],
+tech: ["Frontend локально пересчитывает сумму. Frontend → [[bff|BFF]]: POST /cart/items (book_id, qty). BFF → Cart: пересчёт total."],
       ui: (
-        <div className="catalog">
-          <div className="book">
-            <div className="cover" />
-            <div className="info">
-              <div className="name">«Секреты архитектуры платежей»</div>
-              <div className="meta">Бумажная, 352 стр. · ISBN 978-1-23456-789-7</div>
-              <div className="price">1 299 ₽</div>
-              <div className="qty">
-                Кол-во:
-                <input type="number" min="1" value={qty} onChange={(e) => setQty(parseInt(e.target.value || 1, 10))} />
-              </div>
-              <button type="button" className="btn btn-primary" onClick={onAddToCart}>В корзину</button>
-            </div>
-          </div>
+  <div className="catalog">
+    <div className="book">
+      <div className="cover" />
+      <div className="info">
+        <div className="name">«Секреты архитектуры платежей»</div>
+        <div className="meta">Бумажная, 352 стр. · ISBN 978-1-23456-789-7</div>
+        <div className="price">Цена за шт: {fmtRUB(UNIT_PRICE)}</div>
+
+        <div className="qty">
+          Кол-во:
+          <input
+            type="number"
+            min="1"
+            value={qty}
+            onChange={(e) => setQty(Math.max(1, parseInt(e.target.value || 1, 10)))}
+          />
         </div>
-      ),
-      cta: "В корзину",
+
+        {/* Превью суммы со скидкой */}
+        {(() => {
+          const p = computePricing(qty);
+          return (
+            <div className="preview">
+              <div className="row">
+                <span>Подытог</span>
+                <b>{fmtRUB(p.subtotal)}</b>
+              </div>
+              {p.discount > 0 && (
+                <div className="row green">
+                  <span>Скидка {pct(p.rate)}</span>
+                  <b>−{fmtRUB(p.discount)}</b>
+                </div>
+              )}
+              <div className="row total">
+                <span>Итого</span>
+                <b>{fmtRUB(p.total)}</b>
+              </div>
+            </div>
+          );
+        })()}
+
+        <button type="button" className="btn btn-primary" onClick={onAddToCart}>
+          В корзину
+        </button>
+      </div>
+    </div>
+  </div>
+),
+
       onNext: onAddToCart,
       back: null,
     },
     [Steps.CART]: {
       title: "Корзина",
-      business: ["Проверяем состав заказа, промокоды и доставку (у нас — эльфами, бесплатно)."],
-      tech: ["Cart: калькуляция total, налогов, промо."],
+      business: ["Проверяем состав заказа и количество, показываем пересчёт по правилу: 5% за каждые 3 книги (до 15%)."],
+tech: ["Cart/BFF: калькуляция total по qty и скидке, фиксация суммы в черновике заказа."],
       ui: (
-        <div className="cart">
+  <div className="cart">
+    {(() => {
+      const p = computePricing(qty);
+      return (
+        <>
           <div className="row">
             <div className="title">«Секреты архитектуры платежей»</div>
             <div className="qty">× {qty}</div>
-            <div className="sum">1 299 ₽</div>
+            <div className="sum">{fmtRUB(UNIT_PRICE)}</div>
           </div>
-          <div className="row promo">Промо −200 ₽</div>
-          <div className="row">Доставка: 0 ₽ (эльфы)</div>
-          <div className="total">Итого: 1 099 ₽</div>
-        </div>
-      ),
+
+          <div className="row">
+            <div>Подытог</div>
+            <div>{fmtRUB(p.subtotal)}</div>
+          </div>
+
+          {p.discount > 0 && (
+            <div className="row promo">
+              <div>Скидка {pct(p.rate)}</div>
+              <div>−{fmtRUB(p.discount)}</div>
+            </div>
+          )}
+
+          <div className="row">
+            <div>Доставка</div>
+            <div>0 ₽ (эльфы)</div>
+          </div>
+
+          <div className="total">Итого к оплате: {fmtRUB(p.total)}</div>
+        </>
+      );
+    })()}
+  </div>
+),
       cta: "Оформить заказ",
       onNext: onConfirmCart,
       back: () => setStep(Steps.CATALOG),
